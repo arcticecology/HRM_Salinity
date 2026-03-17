@@ -1,0 +1,374 @@
+This is a tidier version of the chironomid script used in the chloride analysis.
+```{r}
+library(dplyr)
+library(readxl)
+library(vegan)
+library(sf)
+```
+
+Following code loads chironomid and environment data. There are two environment datasets created, env2 and env2x; the first includes variables not used in the subsequent ordinations because they strongly overlap with chloride. This has the code for the env PCA script and the correlation plot.
+
+```{r}
+BCIx<-read.csv(file="salinity_chironomids.csv")
+BCIx <- BCIx[c(2:112)]
+core2 <- BCIx / rowSums(BCIx) * 100 #calculate relative abundance
+N <- 3 #remove taxa with less than 2 obs
+M <- 2 #remove taxa with less than 5%
+i <- colSums(core2 >= M) >= N ## L1
+surface2 <- core2[, i, drop = FALSE] #remove rare taxa
+
+c.pca<-prcomp(sqrt(surface2),scale=T)
+cscores <- scores(c.pca,choices=c(1,2),display=c("sites"),tidy=T)
+cscores2 <- cscores %>% filter(scores == "sites")
+
+env <- read.csv("hrm_env_salpaper.csv")
+env.t <- log(env[c(3:14,17:22)])
+env.x <- log(env[c(3:14)])
+pH <- env$pH
+env2 <- cbind(env.t,pH)
+env2x <- cbind(env.x,pH)
+
+e.pca<-prcomp(env2x,scale=T)
+escores <- scores(e.pca,choices=c(1,2),display=c("sites"),tidy=T)
+escores2 <- escores %>% filter(scores == "sites")
+
+
+autoplot(e.pca,data=env,loadings=F,loadings.label=T,color="black",
+         loadings.color="blue",
+         loadings.label.color="red")+
+  theme_bw()+
+  theme(panel.grid=element_blank())
+
+corrplot(cor(env2x),method="circle",type="lower", addCoef.col="black",
+         tl.col="black",diag=F,addCoefasPercent=F,number.cex=0.6)
+```
+
+This code is for the RDA
+
+```{r}
+rsp <- sqrt(surface2)
+
+f.rda <- rda(rsp~.,data=env2x,scale=T)
+n.rda <- rda(rsp~1,data=env2x,scale=T)
+
+p.rda <- ordistep(n.rda,f.rda,nperm=9999,direction="forward",pin=0.05)
+
+rdascores<- scores(p.rda,tidy=T)
+
+rdascoresx <- rdascores %>% filter(score == "species")
+ggplot(rdascores %>% filter(score == "species"),aes(x=RDA1,y=RDA2))+
+  geom_point()+
+  geom_text_repel(aes(label=label,alpha=score),size=2)+
+  theme_classic()
+
+
+ordiplot(p.rda,scaling=1) |>
+  text("species")
+```
+ 
+TITAN, ANOSIM for Titan and CCME thresholds 
+
+```{r}
+tobj2<-titan(exp(env2$Cl),pam,rel.cut=0.95)
+plot_taxa_ridges(tobj, axis.text.y = 8)
+tobj$sumz.cp
+tobj$sppmax
+
+surfacex <- surface2
+env$titan <- if_else((env$Cl) > 66.5, "H","L") 
+env$CCME <- if_else((env$Cl) > 119.9, "H","L")
+anosim(surface2,env2$CCME)
+```
+
+DIVERSITY and unimodal models
+
+```{r}
+sr.dat<-surface2
+sr.dat$div2 <-diversity(surface2,index="shannon")
+raremax <- min(rowSums(BCIx))
+sr.dat$rich <- (rarefy(BCIx*2,raremax))/2
+sr.dat$Cl <- env2x$Cl
+sr.dat$Depth <- env2x$Depth
+ sr.dat$x_squared <- sr.dat$Depth^2
+
+lmod<-lm(div2~Depth + x_squared,data=sr.dat)
+summary(lmod)
+pred <- predict(lmod)
+
+sr.dat$pred2 <- pred2
+as.dataframe(pred2,sr.dat$Cl)
+
+lmod2<-lm(rich~Cl+x_squared,data=sr.dat)
+summary(lmod2)
+pred2 <- predict(lmod2)
+
+
+ggplot(sr.dat,aes(x=Cl,y=rich))+
+      geom_point()+
+      geom_ribbon(aes(ymax=pred+1.418,ymin=pred-1.418),alpha=0.2)+
+      geom_line(aes(y=pred2),col="black")+
+          geom_vline(aes(xintercept=log(66.5)),col="blue",linetype=3)+
+  geom_vline(aes(xintercept=log(120)),col="red",linetype=2)+
+        theme_bw()+
+    theme(panel.grid=element_blank())+
+      labs(x="Chloride ln(mg/L)",y="Rarefied richness")
+
+
+d1<-ggplot(sr.dat,aes(x=(env2$Cl),y=rich))+
+  geom_point()+
+  geom_smooth(method="lm",formula=y~x+x_squared)+
+    geom_vline(aes(xintercept=log(66)),col="blue",linetype=3)+
+  geom_vline(aes(xintercept=log(120)),col="red",linetype=2)+
+  theme_bw()+
+    theme(panel.grid=element_blank())
+
+r1<-ggplot(sr.dat,aes(x=log(Cl),y=rich))+
+    geom_smooth(method="gam")+
+  geom_point()+
+    geom_vline(aes(xintercept=log(120)),col="red",linetype=2)+
+  theme_bw()+
+  theme(panel.grid=element_blank())
+
+plot_grid(r1,d1)
+```
+
+GLMS
+```{r}
+env3 <- env2[c(2:7,11:13)]
+
+   expit <- function(x) {
+  exp(x) / (1 + exp(x))
+   }
+
+
+X <- model.matrix(sf ~ .,data=env3)
+X <- model.matrix(var1 ~ .,data=env3)
+model <- cv.glmnet(X,sf,family=binomial(link="logit"),alpha=1)
+bl <- model$lambda.1se
+best_model <- glmnet(X,sf,family=binomial(link="logit"),alpha=1,lambda=bl)
+coef(best_model)
+
+
+var1 <- (surface2$Heterotanytarsus)
+sf1 <- cbind(var1,(100-var1))
+
+mx1<- glm(formula=sf1 ~ Cl + Al,data=env3,
+        family="binomial"(link="logit"))
+summary(mx1)
+
+mx2<- glm(formula=sf1 ~ Cl,data=env3,
+        family="binomial"(link="logit"))
+summary(mx2)
+
+mx2<- glm(formula=sf1 ~ Al,data=env3,
+        family="binomial"(link="logit"))
+summary(mx2)
+
+
+
+pred1 <- expit(predict(mx1))*100
+
+p1<-ggplot(surface2,aes(x=env3$Cl,y=(Heterotrissocladius.grimshawi.type)))+
+  geom_point()+
+  geom_line(aes(y=pred1))+
+    theme_bw()+
+  theme(panel.grid=element_blank())+
+            geom_vline(aes(xintercept=log(66.5)),col="blue",linetype=3)+
+  geom_vline(aes(xintercept=log(120)),col="red",linetype=2)+
+  labs(x="",y="",title="H. grimshawi-type")
+
+var2 <- (surface2$Heterotrissocladius.grimshawi.type)
+sf2 <- cbind(var2,(100-var2))
+
+mx2<- glm(formula=sf2 ~ Cl,data=env3,
+        family="binomial"(link="logit"))
+
+pred2 <- expit(predict(mx2))*100
+
+p2<-ggplot(surface2,aes(x=env3$Cl,y=(Paratanytarsus)))+
+  geom_point()+
+  geom_line(aes(y=pred2))+
+    theme_bw()+
+  theme(panel.grid=element_blank())+
+  labs(x="",y="",title="Paratanytarsus")+
+            geom_vline(aes(xintercept=log(78.5)),col="blue",linetype=3)+
+  geom_vline(aes(xintercept=log(120)),col="red",linetype=2)
+
+var3 <- (surface2$Heterotrissocladius.marcidus.type)
+sf3 <- cbind(var3,(100-var3))
+
+mx3<- glm(formula=sf3 ~ Cl,data=env3,
+        family="binomial"(link="logit"))
+
+pred3 <- expit(predict(mx3))*100
+
+p3<-ggplot(surface2,aes(x=env3$Cl,y=(Heterotrissocladius.marcidus.type)))+
+  geom_point()+
+  geom_line(aes(y=pred3))+
+    theme_bw()+
+  theme(panel.grid=element_blank())+
+  labs(x="",y="",title="H. marcidus-type")+
+            geom_vline(aes(xintercept=log(66.5)),col="blue",linetype=3)+
+  geom_vline(aes(xintercept=log(120)),col="red",linetype=2)
+
+var4 <- (surface2$Heterotanytarsus)
+sf4 <- cbind(var4,(100-var4))
+
+mx4<- glm(formula=sf4 ~ Cl,data=env3,
+        family="binomial"(link="logit"))
+
+pred4 <- expit(predict(mx4))*100
+
+p4<-ggplot(surface2,aes(x=env3$Cl,y=(Heterotanytarsus)))+
+  geom_point()+
+  geom_line(aes(y=pred4))+
+    theme_bw()+
+  theme(panel.grid=element_blank())+
+  labs(x="",y="",title="Heterotanytarsus")+
+            geom_vline(aes(xintercept=log(66.5)),col="blue",linetype=3)+
+  geom_vline(aes(xintercept=log(120)),col="red",linetype=2)
+
+var5 <- (surface2$Dicrotendipes)
+sf5 <- cbind(var5,(100-var5))
+
+mx5<- glm(formula=sf5 ~ Cl,data=env3,
+        family="binomial"(link="logit"))
+
+pred5 <- expit(predict(mx5))*100
+
+p5<-ggplot(surface2,aes(x=env3$Cl,y=(Dicrotendipes)))+
+  geom_point()+
+  geom_line(aes(y=pred5))+
+            geom_vline(aes(xintercept=log(78.5)),col="blue",linetype=3)+
+  geom_vline(aes(xintercept=log(120)),col="red",linetype=2)+
+  theme_bw()+
+  theme(panel.grid=element_blank())+
+  labs(x="",y="",title="Dicrotendipes")
+
+   plot_grid(p1,p3,p4,p2,p5)
+```
+
+HOF models
+Makes a PA matrix 
+```{r}
+
+pam <- as.data.frame((surface2 > 0) * 1L)
+print(pam)
+
+#to id taxa based on bootstrapping
+mods.sq2<-HOF(pam,(env3$Cl),M=1,bootstrap=9999,freq.limit=3) 
+
+#with taxa selected
+pamc <- pam[c(2,3,4,5,10,11,12,13,16,17,23,30,32,33,34)]
+mods.sq2<-HOF(pamc,(env3$Cl),M=1,bootstrap=NULL,freq.limit=3) 
+plot(mods.sq2,col=c("#E69F00","#56B4E9","#009E73","#0072B2","#D55E00","#CC79A7","#F0E442"))
+
+```
+
+Now for the spatial stuff!
+
+```{r}
+coor.df <-  read.csv("env2_overlap_catr2.csv")
+coor.df.copy <- coor.df
+coorr <- coor.df[c(23,24)]
+coordinates(coorr)=~Longitude+Latitude
+proj4string(coorr)<- CRS("+proj=longlat +datum=WGS84")
+shpfile2<-shapefile(coorr,"myshapefile2.shp",overwrite=TRUE)
+checkx<-st_read("myshapefile2.shp")
+
+require(spdep)
+nbnear1<-spdep::dnearneigh(coorr,0,0.105)
+mxy <- as.matrix(coorr)
+rownames(mxy) <- NULL
+
+require(pgirmess)
+
+#escores2$PC1, escores2$PC2, cscores$PC1, cscores$PC2
+cl1<-correlog(coords=mxy,z=escores2$PC1,method="Moran")
+cl2 <- correlog(coords=mxy,z=env2x$Cl,method="Moran")
+plot(cl1) #chironomid PC1
+plot(cl2) #CL 
+#identifies autocorrelation over lag distances
+
+plot(correlog(coords=mxy,z=cscores2$PC2,method="Moran"))
+
+plot(correlog(coords=mxy,z=escores2$PC1,method="Moran"))
+
+plot(correlog(coords=mxy,z=escores2$PC2,method="Moran"))
+```
+
+Here is where I cry over trying to get adegraphics to work :(
+
+```{r}
+
+distgab <- nbdists(nbnear1, mxy)
+
+#Weights the nearest neighbours by distance
+fdist <- lapply(distgab, function(x) 1 - x/max(dist(mxy)))
+listwgab <- nb2listw(nbnear1, glist = fdist)
+
+require(adespatial)
+mem.gab <- mem(listwgab)
+plot(mem.gab,SpORcoords = mxy)
+checkx<-st_read("halis.shp")
+
+mm1<-mem.gab[,c(1)]
+s.value(mxy, mem.gab[,c(1)],
+        xlim=c(44.5,44.9),
+        ylim=c(-63.9,-63.4),
+        nb=nbnear1,
+        pnb.edge.col="red",
+        symbol = "circle", ppoint.cex = 0.6)
+
+
+  barplot(attr(mem.gab, "values"), 
+        main = "Eigenvalues of the spatial weighting matrix", cex.main = 0.7)
+  
+  #looks for variables which are significantly spatially autocorrelated
+MC.env <- moran.randtest(x=env2x$Cl,listw=listwgab,nrepet=9999)
+  
+  mc.bounds <- moran.bounds(listwgab)
+mc.bounds
+env.maps <- s1d.barchart(MC.env$obs, labels = MC.env$names, plot = FALSE, xlim = 1.1 * mc.bounds, paxes.draw = TRUE, pgrid.draw = FALSE)
+addline(env.maps, v = mc.bounds, plot = TRUE, pline.col = 'red', pline.lty = 3)
+
+MC.sp <- moran.randtest(x=sqrt(surface2),listw=listwgab,nrepet=999)
+  
+  mc.bounds <- moran.bounds(listwgab)
+mc.bounds
+sp.maps <- s1d.barchart(MC.sp$obs, labels = MC.sp$names, plot = FALSE, xlim = 1.1 * mc.bounds, paxes.draw = TRUE, pgrid.draw = FALSE)
+addline(sp.maps, v = mc.bounds, plot = TRUE, pline.col = 'red', pline.lty = 3)
+
+##does scalograms to tell us which vectors are important in explaining variation.
+##MEM1 and MEM27 explained PC1 and PC2, while 2 and 23 explained PC2.
+scalo <- scalogram(cscores2$PC2, mem.gab)
+plot(scalo)
+scalo2 <- scalogram(cscores2$PC1, mem.gab)
+plot(scalo2)
+
+##If we select those -
+selm <- mem.gab[,c(1,2,23,27)]
+vpar<-varpart(sqrt(surface2),env2x$Cl,selm)
+vp<-plot(vpar,bg=c(5,6),Xnames=c("Environment","Spatial"))
+
+pca.hell<-ade4::dudi.pca(sqrt(surface2),scale=T,scann=F,nf=2)
+ms.hell<-multispati(pca.hell, listw = listwgab, scannf = F)
+
+
+s.value(mxy, sr.dat$rich,
+        xlim=c(44.5,44.9),
+        ylim=c(-63.9,-63.4),
+        nb=nbnear1,
+        pnb.edge.col="red",
+        symbol = "circle", ppoint.cex = 0.6)
+
+
+plot<-s.value(mxy, ms.hell$li,
+        xlim=c(44.5,44.9),
+        ylim=c(-63.9,-63.4),
+        nb=nbnear1,
+        pnb.edge.col="red",
+        symbol = "circle", ppoint.cex = 0.6)
+
+plot
+```
